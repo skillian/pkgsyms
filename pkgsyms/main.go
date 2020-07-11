@@ -9,6 +9,7 @@ import (
 	"io"
 	"log"
 	"os"
+	"path"
 	"path/filepath"
 	"strings"
 
@@ -17,10 +18,6 @@ import (
 )
 
 const (
-	pkgsyms       = "pkgsyms"
-	progGoPkgPath = "github.com/skillian/" + pkgsyms
-	pkgsymsGo     = pkgsyms + ".go"
-
 	pkgNeeds = (packages.NeedName |
 		packages.NeedFiles |
 		packages.NeedCompiledGoFiles |
@@ -28,12 +25,15 @@ const (
 		packages.NeedTypes | packages.NeedTypesSizes |
 		packages.NeedSyntax | packages.NeedTypesInfo |
 		packages.NeedDeps)
+
+	pkgsymsPkgName = "pkgsyms"
+	pkgsymsPkgPath = "github.com/skillian/" + pkgsymsPkgName
 )
 
 var (
 	progname = filepath.Base(os.Args[0])
 
-	output  = flag.String("output", "", "output filename; default srcdir/"+pkgsymsGo)
+	output  = flag.String("output", "", "output filename; default srcdir/pkgsyms.go")
 	varname = flag.String("varname", "Pkg", "variable name of the package symbols")
 	pkgname = flag.String("package", "", "package name to use in the output")
 	//pkgprefix = flag.String("prefix", "", "the package prefix")
@@ -56,28 +56,19 @@ Flags:
 func main() {
 	var err error
 	log.SetFlags(0)
-	log.SetPrefix("pkg: ")
+	log.SetPrefix(pkgsymsPkgName + ": ")
 	flag.Usage = usage
 	flag.Parse()
+
 	args := flag.Args()
 	switch len(args) {
 	case 0:
-		if srcdir, err = os.Getwd(); err != nil {
-			log.Fatal(errors.ErrorfWithCause(
-				err, "failed to get current working directory"))
-		}
-		// Getwd can return one of multiple possibly symlinked paths,
-		// so let's clean up and (try to) keep it consistent!
-		srcdir = filepath.Clean(srcdir)
+		srcdir = "."
 	case 1:
 		srcdir = args[0]
 	default:
-		log.Fatal(errors.Errorf(
-			"only one package directory is allowed."))
+		log.Fatal("one or zero directories allowed, not", len(args))
 	}
-	// if len(strings.TrimSpace(*output)) == 0 {
-	// 	*output = filepath.Join(srcdir, pkgsymsGo)
-	// }
 
 	outfile, err := getOutput()
 	if err != nil {
@@ -85,6 +76,7 @@ func main() {
 			err, "failed to get output file: %q", *output))
 	}
 	defer outfile.Close()
+
 	g := generator{
 		pkg:   mustParsePackage(srcdir),
 		decls: make([]decl, 0, 512),
@@ -95,6 +87,10 @@ func main() {
 	for i, d := range g.decls {
 		declstrs[i] = strings.Join(
 			[]string{"\t\t", d.String(), ",\n"}, "")
+	}
+
+	if *pkgname == "" {
+		*pkgname = path.Base(g.pkg.Name)
 	}
 
 	fmt.Fprintf(
@@ -113,8 +109,8 @@ func init() {
 `,
 		progname, strings.Join(os.Args[1:], " "),
 		*pkgname,
-		progGoPkgPath,
-		*varname, pkgsyms, srcdir,
+		pkgsymsPkgPath,
+		*varname, pkgsymsPkgName, g.pkg.PkgPath,
 		*varname,
 		strings.Join(declstrs, ""),
 	)
@@ -161,7 +157,7 @@ func (g *generator) generate() {
 }
 
 func (g *generator) inspect(n ast.Node) bool {
-	kind := ""
+	var kind declKind
 	var sb strings.Builder
 	switch n := n.(type) {
 	case *ast.GenDecl:
@@ -172,15 +168,15 @@ func (g *generator) inspect(n ast.Node) bool {
 				if !name.IsExported() {
 					continue
 				}
-				g.decls = append(g.decls, decl{g: g, Kind: "Type", Name: name.Name})
+				g.decls = append(g.decls, decl{g: g, kind: typeDecl, Name: name.Name})
 			}
 			return false
 		case token.CONST:
-			kind = "Const"
+			kind = constDecl
 			fallthrough
 		case token.VAR:
-			if kind == "" {
-				kind = "Var"
+			if kind == badDecl {
+				kind = varDecl
 			}
 			for _, s := range n.Specs {
 				vs := s.(*ast.ValueSpec)
@@ -199,7 +195,7 @@ func (g *generator) inspect(n ast.Node) bool {
 					}
 					g.decls = append(g.decls, decl{
 						g:    g,
-						Kind: kind,
+						kind: kind,
 						Name: id.Name,
 						Type: sb.String(),
 					})
@@ -214,7 +210,7 @@ func (g *generator) inspect(n ast.Node) bool {
 		if !n.Name.IsExported() {
 			return true
 		}
-		g.decls = append(g.decls, decl{g: g, Kind: "Func", Name: n.Name.Name})
+		g.decls = append(g.decls, decl{g: g, kind: funcDecl, Name: n.Name.Name})
 		return false
 	}
 	return true
@@ -223,8 +219,7 @@ func (g *generator) inspect(n ast.Node) bool {
 type decl struct {
 	g *generator
 
-	// Kind is "Const", "Func", "Type" or "Var"
-	Kind string
+	kind declKind
 
 	// Name of the declared object
 	Name string
@@ -233,28 +228,49 @@ type decl struct {
 	Type string
 }
 
+type declKind int
+
+const (
+	badDecl declKind = iota
+	constDecl
+	typeDecl
+	funcDecl
+	varDecl
+)
+
+var declStrings = []string{
+	"<bad decl>",
+	"Const",
+	"Type",
+	"Func",
+	"Var",
+}
+
+func (k declKind) String() string { return declStrings[int(k)] }
+
 func (d decl) String() string {
-	switch d.Kind {
-	case "Type":
+	switch d.kind {
+	case typeDecl:
 		return fmt.Sprintf(
 			"%s.MakeType(%q, (*%s)(nil))",
-			pkgsyms, d.Name, d.g.prefix+d.Name)
-	case "Var":
-		return fmt.Sprintf(
-			"%s.Make%s(%q, &%s)",
-			pkgsyms, d.Kind, d.Name, d.g.prefix+d.Name)
+			pkgsymsPkgName, d.Name, d.g.prefix+d.Name)
 	default:
 		return fmt.Sprintf(
 			"%s.Make%s(%q, %s)",
-			pkgsyms, d.Kind, d.Name, d.g.prefix+d.Name)
+			pkgsymsPkgName, d.kind, d.Name, d.g.prefix+d.Name)
 	}
 }
 
 func getOutput() (io.WriteCloser, error) {
-	if len(*output) == 0 || *output == "-" {
+	switch {
+	case *output == "-":
 		return nopCloser{os.Stdout}, nil
+	case len(*output) == 0:
+		*output = filepath.Join(srcdir, pkgsymsPkgName+".go")
+		fallthrough
+	default:
+		return os.Create(*output)
 	}
-	return os.Create(*output)
 }
 
 type nopCloser struct {

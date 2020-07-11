@@ -15,16 +15,18 @@ package pkgsyms
 import (
 	"reflect"
 	"sync"
-
-	"github.com/skillian/errors"
 )
 
-var idx sync.Map
+//go:generate pkgsyms -output=testsyms_test.go
+var (
+	// pkgs is a mapping of package names to their *Packages.
+	pkgs sync.Map
+)
 
 // Package defines a package.  It includes the package name and its exported
 // symbols.
 type Package struct {
-	// Name of the package
+	// Name of the package.  Do not mutate this string.
 	Name string
 
 	// Symbols exported by the package
@@ -33,32 +35,53 @@ type Package struct {
 
 // Of gets the Package definition of the package with the given name.
 func Of(name string) *Package {
-	v, loaded := idx.Load(name)
+	v, loaded := pkgs.Load(name)
 	if loaded {
 		return v.(*Package)
 	}
 	pkg := &Package{Name: name}
-	v, loaded = idx.LoadOrStore(name, pkg)
+	v, loaded = pkgs.LoadOrStore(name, pkg)
 	if loaded {
 		return v.(*Package)
 	}
 	return pkg
 }
 
+// Lookup a package by its name.
+func Lookup(name string) (*Package, error) {
+	v, ok := pkgs.Load(name)
+	if !ok {
+		return nil, NotFound{Pkg: name}
+	}
+	return v.(*Package), nil
+}
+
 // Symbol is an exported constant, function, type or variable.
+//
+// Symbols have names and values.  What you get by calling their Get function
+// depends on the Symbol implementation.  Unlike the plugin package which
+// leaves its Symbol definitions directly available to type assertions, you
+// should instead try to type-assert against the result of the Get function.
 type Symbol interface {
-	// Name of the symbol
+	// Name is the exported name of the symbol
 	Name() string
 
-	// Get the value associated with the symbol
+	// Get the value associated with the symbol.
 	Get() interface{}
 }
 
 // Symbols are exported names in a package which can include things like
 // constants, functions, types and variables.
 type Symbols struct {
+	// mutex to control access to the set of symbols.  Usually, symbols
+	// are defined at program start, but the API currently defines allows
+	// symbols to be defined at any time.
 	mutex sync.Mutex
+
+	// names is a mapping of symbol names to their indexes into slice.
 	names map[string]int
+
+	// slice is the collection of exposed symbols in a Package.
 	slice []Symbol
 }
 
@@ -73,13 +96,17 @@ func MakeSymbols(capacity int) Symbols {
 	}
 }
 
-// Lookup a symbol in the set.
+// Lookup a symbol in the set.  This function is meant to resemble the plugin
+// package's Lookup function.
 func (syms *Symbols) Lookup(name string) (Symbol, error) {
 	syms.mutex.Lock()
 	defer syms.mutex.Unlock()
+	if syms.names == nil {
+		return nil, NotFound{Sym: name}
+	}
 	i, ok := syms.names[name]
 	if !ok {
-		return nil, errors.Errorf("symbol %q not found", name)
+		return nil, NotFound{Sym: name}
 	}
 	return syms.slice[i], nil
 }
@@ -94,10 +121,11 @@ func (syms *Symbols) Add(ss ...Symbol) {
 		syms.slice = make([]Symbol, 0, cap(ss))
 	}
 	for _, s := range ss {
-		if _, ok := syms.names[s.Name()]; ok {
+		name := s.Name()
+		if _, ok := syms.names[name]; ok {
 			continue
 		}
-		syms.names[s.Name()] = len(syms.slice)
+		syms.names[name] = len(syms.slice)
 		syms.slice = append(syms.slice, s)
 	}
 }
@@ -110,7 +138,7 @@ type Const struct {
 	value interface{}
 }
 
-// MakeConst creates a Const
+// MakeConst creates a Const Symbol.
 func MakeConst(name string, value interface{}) Const {
 	return Const{name: name, value: value}
 }
@@ -121,13 +149,13 @@ func (c Const) Name() string { return c.name }
 // Get the value of the constant.
 func (c Const) Get() interface{} { return c.value }
 
-// Func wraps a function.
+// Func is a global function Symbol.
 type Func struct {
 	name string
 	fval interface{}
 }
 
-// MakeFunc creates a Func
+// MakeFunc creates a Func Symbol.
 func MakeFunc(name string, fval interface{}) Func {
 	return Func{name: name, fval: fval}
 }
@@ -149,6 +177,9 @@ type Type struct {
 //
 // 	MakeType("MyInterface", (*MyInterface)(nil))
 //
+// creates a Type that references the unwrapped MyInterface and not a pointer
+// to MyInterface.  The pointer is necessary because of how interfaces work in
+// Go.
 func MakeType(name string, pval interface{}) Type {
 	return Type{
 		name: name,
@@ -171,9 +202,6 @@ type Var struct {
 
 	// addr is a pointer to the variable.
 	addr interface{}
-
-	fget func() interface{}
-	fset func(v interface{})
 }
 
 // Get the value of the variable
