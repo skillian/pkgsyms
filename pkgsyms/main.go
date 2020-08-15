@@ -11,6 +11,7 @@ import (
 	"os"
 	"path"
 	"path/filepath"
+	"sort"
 	"strings"
 
 	"github.com/skillian/errors"
@@ -39,6 +40,27 @@ var (
 	//pkgprefix = flag.String("prefix", "", "the package prefix")
 	srcdir string
 )
+
+// Config configures pkgsyms
+type Config struct {
+	pkgAlias string
+}
+
+// Option modifies Config.
+type Option func(c *Config) error
+
+// Alias allows an alias name to be specified for the package.
+func Alias(name string) Option {
+	return func(c *Config) error {
+		if c.pkgAlias != "" {
+			return errors.Errorf(
+				"redefinition of package alias from %q to %q",
+				c.pkgAlias, name)
+		}
+		c.pkgAlias = name
+		return nil
+	}
+}
 
 func usage() {
 	fmt.Fprintf(os.Stderr, `Create a plugin-like object to access symbols from a package.
@@ -83,14 +105,28 @@ func main() {
 	}
 	g.generate()
 
+	sort.Slice(g.decls, func(i, j int) bool {
+		a, b := g.decls[i], g.decls[j]
+		c := a.kind - b.kind
+		if c != 0 {
+			return c < 0
+		}
+		return strings.Compare(a.Name, b.Name) < 0
+	})
+
 	declstrs := make([]string, len(g.decls))
 	for i, d := range g.decls {
 		declstrs[i] = strings.Join(
 			[]string{"\t\t", d.String(), ",\n"}, "")
 	}
 
+	pkgbase := path.Base(g.pkg.Name)
 	if *pkgname == "" {
-		*pkgname = path.Base(g.pkg.Name)
+		*pkgname = pkgbase
+	}
+	imports := fmt.Sprintf("%q", pkgsymsPkgPath)
+	if *pkgname != pkgbase {
+		imports += fmt.Sprintf("\n\t%q", g.pkg.PkgPath)
 	}
 
 	fmt.Fprintf(
@@ -98,7 +134,9 @@ func main() {
 
 package %s
 
-import %q
+import (
+	%s
+)
 
 var %s = %s.Of(%q)
 
@@ -109,7 +147,7 @@ func init() {
 `,
 		progname, strings.Join(os.Args[1:], " "),
 		*pkgname,
-		pkgsymsPkgPath,
+		imports,
 		*varname, pkgsymsPkgName, g.pkg.PkgPath,
 		*varname,
 		strings.Join(declstrs, ""),
