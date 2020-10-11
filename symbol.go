@@ -204,15 +204,12 @@ type Var struct {
 	addr interface{}
 }
 
-// MakeVar creates a variable reference
-func MakeVar(name string, value interface{}) Var {
-	return Var{
-		name: name,
-		addr: value,
-	}
+// MakeVar creates a variable symbol
+func MakeVar(name string, addr interface{}) Var {
+	return Var{name, addr}
 }
 
-// Name of the variable.
+// Name of the variable
 func (v Var) Name() string { return v.name }
 
 // Get the value of the variable
