@@ -204,6 +204,17 @@ type Var struct {
 	addr interface{}
 }
 
+// MakeVar creates a variable reference
+func MakeVar(name string, value interface{}) Var {
+	return Var{
+		name: name,
+		addr: value,
+	}
+}
+
+// Name of the variable.
+func (v Var) Name() string { return v.name }
+
 // Get the value of the variable
 func (v Var) Get() interface{} {
 	return reflect.ValueOf(v.addr).Elem().Interface()
